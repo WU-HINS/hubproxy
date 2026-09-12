@@ -89,3 +89,27 @@ enabled = true
 enabled = true
 # 默认缓存时间(分钟)
 defaultTTL = "20m"
+
+# ── 国内访问优化（可选）──────────────────────────────
+# 针对国内网络环境，复用 gh-proxy 这类"国内可达"的第三方反代作为回源通道，
+# 避免直连被墙的 Docker Hub / GitHub，最大化利用国内机子的带宽。
+[chinaOptimize]
+# 国内访问优化模式：
+#   ""       关闭（默认，保持原生直连上游）
+#   "backend" 后端回源改写：对外仍用本地原生 Registry API v2 / GitHub 代理，
+#            但回源拉取这一跳改写为下方回源地址，客户端 docker pull / wget 命令零改动。
+#   "302"    重定向模式：GitHub 加速直接 302 跳转到回源地址，由客户端直连。
+#            （Docker 因 Registry v2 协议无法用 302，仍走后端回源改写）
+mode = ""
+
+# ── Docker 回源目标（仅 backend 模式下、"Docker Hub 公共镜且无鉴权"生效）──
+# gh-proxy 可作为 docker pull 目标（docker pull {dockerBase}/nginx 能拉下镜像），
+#   但不能写进 daemon.json 的 registry-mirrors（它不是透明 Docker Hub 镜像，路径带 /docker 前缀）。
+# 只改写：registry-1.docker.io 的无鉴权(Authorization)请求 → {dockerBase}/v2/...
+# 有鉴权/私有镜像、以及 ghcr/gcr/quay 等非 Docker Hub 的 registry：直接走原路由直连上游。
+dockerBase = "https://gh-proxy.org/docker"
+
+# GitHub 回源基础地址（backend / 302 模式生效）
+#   gh-proxy 实测可加速 GitHub（返回真实文件）
+#   实际请求/跳转 = {githubBase}/https://github.com/...
+githubBase = "https://gh-proxy.com"

@@ -77,7 +77,7 @@ func InitDockerProxy() {
 	options := []remote.Option{
 		remote.WithAuth(authn.Anonymous),
 		remote.WithUserAgent("hubproxy/go-containerregistry"),
-		remote.WithTransport(utils.GetGlobalHTTPClient().Transport),
+		remote.WithTransport(utils.GetDockerTransport()),
 	}
 
 	dockerProxy = &DockerProxy{
@@ -633,7 +633,7 @@ func createUpstreamOptions(mapping config.RegistryMapping) []remote.Option {
 	options := []remote.Option{
 		remote.WithAuth(authn.Anonymous),
 		remote.WithUserAgent("hubproxy/go-containerregistry"),
-		remote.WithTransport(utils.GetGlobalHTTPClient().Transport),
+		remote.WithTransport(utils.GetDockerTransport()),
 	}
 
 	// 预留将来不同Registry的差异化认证逻辑扩展点

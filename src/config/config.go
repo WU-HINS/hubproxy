@@ -55,6 +55,22 @@ type AppConfig struct {
 		Enabled    bool   `toml:"enabled"`
 		DefaultTTL string `toml:"defaultTTL"`
 	} `toml:"tokenCache"`
+
+	// 国内访问优化配置
+	ChinaOptimize struct {
+		// 优化模式：""（关闭/原生直连）| "backend"（后端回源改写）| "302"（重定向到代理）
+		Mode string `toml:"mode"`
+
+		// Docker 后端回源目标（仅对 Docker Hub 公共镜像生效）。
+		// 只改写 registry-1.docker.io 且无鉴权(Authorization)的拉取，
+		// 有鉴权/私有镜像以及 ghcr/gcr/quay 等非 Docker Hub 的 registry 直接走原路由。
+		// 示例：https://docker.1ms.run
+		DockerBase string `toml:"dockerBase"`
+
+		// GitHub 后端回源/302 的基础地址（如 https://gh-proxy.com）
+		// 实际请求 = {GitHubBase}/https://github.com/...
+		GitHubBase string `toml:"githubBase"`
+	} `toml:"chinaOptimize"`
 }
 
 var (
@@ -143,6 +159,15 @@ func DefaultConfig() *AppConfig {
 		}{
 			Enabled:    true,
 			DefaultTTL: "20m",
+		},
+		ChinaOptimize: struct {
+			Mode       string `toml:"mode"`
+			DockerBase string `toml:"dockerBase"`
+			GitHubBase string `toml:"githubBase"`
+		}{
+			Mode:       "",
+			DockerBase: "https://gh-proxy.org/docker",
+			GitHubBase: "https://gh-proxy.com",
 		},
 	}
 }
@@ -274,5 +299,15 @@ func overrideFromEnv(cfg *AppConfig) {
 		if maxImages, err := strconv.Atoi(val); err == nil && maxImages > 0 {
 			cfg.Download.MaxImages = maxImages
 		}
+	}
+
+	if val, ok := os.LookupEnv("CN_OPTIMIZE_MODE"); ok {
+		cfg.ChinaOptimize.Mode = strings.TrimSpace(val)
+	}
+	if val := os.Getenv("CN_DOCKER_BASE"); val != "" {
+		cfg.ChinaOptimize.DockerBase = strings.TrimSpace(strings.TrimSuffix(val, "/"))
+	}
+	if val := os.Getenv("CN_GITHUB_BASE"); val != "" {
+		cfg.ChinaOptimize.GitHubBase = strings.TrimSpace(strings.TrimSuffix(val, "/"))
 	}
 }

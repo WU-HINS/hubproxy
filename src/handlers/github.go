@@ -78,6 +78,15 @@ func GitHubProxyHandler(c *gin.Context) {
 		rawPath = strings.Replace(rawPath, "/blob/", "/raw/", 1)
 	}
 
+	// 国内访问优化
+	if redirectTo := utils.GitHubRedirectURL(rawPath); redirectTo != "" {
+		// 302 模式：直接重定向客户端到国内反代，由客户端直连
+		c.Redirect(http.StatusFound, redirectTo)
+		return
+	}
+	// backend 模式：后端回源改写（对外接口不变，仅回源一跳指向国内反代）
+	rawPath = utils.GitHubBackendURL(rawPath)
+
 	ProxyGitHubRequest(c, rawPath)
 }
 
