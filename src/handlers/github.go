@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -80,7 +81,11 @@ func GitHubProxyHandler(c *gin.Context) {
 
 	// 国内访问优化
 	if redirectTo := utils.GitHubRedirectURL(rawPath); redirectTo != "" {
-		// 302 模式：直接重定向客户端到国内反代，由客户端直连
+		// 302 模式：先在后端把国内反代自身可能产生的 302 提前解析掉，
+		// 直接把客户端指向最终地址，避免客户端经历多次 302 跳转。
+		if final := utils.ResolveRedirectTarget(redirectTo); final != "" {
+			redirectTo = final
+		}
 		c.Redirect(http.StatusFound, redirectTo)
 		return
 	}
@@ -105,6 +110,24 @@ func ProxyGitHubRequest(c *gin.Context, u string) {
 	proxyGitHubWithRedirect(c, u, 0)
 }
 
+// resolveRedirectLocation 解析 3xx 响应的 Location 头（支持相对地址）。
+func resolveRedirectLocation(resp *http.Response, current string) string {
+	location := resp.Header.Get("Location")
+	if location == "" {
+		return ""
+	}
+	base := current
+	if resp.Request != nil && resp.Request.URL != nil {
+		base = resp.Request.URL.String()
+	}
+	if b, err := url.Parse(base); err == nil {
+		if ref, err := b.Parse(location); err == nil {
+			return ref.String()
+		}
+	}
+	return location
+}
+
 // proxyGitHubWithRedirect 带重定向的GitHub代理请求
 func proxyGitHubWithRedirect(c *gin.Context, u string, redirectCount int) {
 	const maxRedirects = 20
@@ -127,7 +150,13 @@ func proxyGitHubWithRedirect(c *gin.Context, u string, redirectCount int) {
 	}
 	req.Header.Del("Host")
 
-	resp, err := utils.GetGlobalHTTPClient().Do(req)
+	// backend（代理）模式下禁用自动跟随 3xx，改为在服务端逐跳处理：
+	// 这样可以对每一跳的 GitHub 地址重新做国内回源改写，并把 302 一次性扁平化。
+	client := utils.GetGlobalHTTPClient()
+	if utils.ChinaBackendMode() {
+		client = utils.GetGitHubHTTPClient()
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		c.String(http.StatusInternalServerError, fmt.Sprintf("server error %v", err))
 		return
@@ -137,6 +166,23 @@ func proxyGitHubWithRedirect(c *gin.Context, u string, redirectCount int) {
 			fmt.Printf("关闭响应体失败: %v\n", err)
 		}
 	}()
+
+	// 上游返回 3xx：在服务端继续跟随，避免把 302 透传给客户端造成多次跳转。
+	// backend 模式下若跳转目标是 GitHub 家族地址，重新按国内回源地址改写，
+	// 保证后续每一跳仍走国内反代，而不是直连可能被墙的 GitHub。
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		next := resolveRedirectLocation(resp, u)
+		if next == "" {
+			c.Status(resp.StatusCode)
+			return
+		}
+		if utils.ChinaBackendMode() && CheckGitHubURL(next) != nil {
+			next = utils.GitHubBackendURL(next)
+		}
+		_ = resp.Body.Close()
+		proxyGitHubWithRedirect(c, next, redirectCount+1)
+		return
+	}
 
 	// 检查并处理被阻止的内容类型
 	if c.Request.Method == "GET" {
@@ -198,16 +244,6 @@ func proxyGitHubWithRedirect(c *gin.Context, u string, redirectCount int) {
 			}
 		}
 
-		// 处理重定向
-		if location := resp.Header.Get("Location"); location != "" {
-			if CheckGitHubURL(location) != nil {
-				c.Header("Location", "/"+location)
-			} else {
-				proxyGitHubWithRedirect(c, location, redirectCount+1)
-				return
-			}
-		}
-
 		c.Status(resp.StatusCode)
 
 		// 输出处理后的内容
@@ -219,16 +255,6 @@ func proxyGitHubWithRedirect(c *gin.Context, u string, redirectCount int) {
 		for key, values := range resp.Header {
 			for _, value := range values {
 				c.Header(key, value)
-			}
-		}
-
-		// 处理重定向
-		if location := resp.Header.Get("Location"); location != "" {
-			if CheckGitHubURL(location) != nil {
-				c.Header("Location", "/"+location)
-			} else {
-				proxyGitHubWithRedirect(c, location, redirectCount+1)
-				return
 			}
 		}
 

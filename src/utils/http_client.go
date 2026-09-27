@@ -12,6 +12,7 @@ import (
 var (
 	globalHTTPClient *http.Client
 	searchHTTPClient *http.Client
+	githubHTTPClient *http.Client
 )
 
 // InitHTTPClients 初始化HTTP客户端
@@ -59,6 +60,25 @@ func InitHTTPClients() {
 // GetGlobalHTTPClient 获取全局HTTP客户端
 func GetGlobalHTTPClient() *http.Client {
 	return globalHTTPClient
+}
+
+// GetGitHubHTTPClient 返回 GitHub 代理专用客户端：不自动跟随 3xx 重定向。
+// 由上层逐跳解析，这样在 backend（代理）模式下可以对每一跳的 GitHub 地址
+// 重新做国内回源改写，并把 302 在服务端一次性扁平化，避免客户端经历多次 302。
+func GetGitHubHTTPClient() *http.Client {
+	if githubHTTPClient == nil {
+		tr := http.DefaultTransport
+		if base := GetGlobalHTTPClient(); base != nil && base.Transport != nil {
+			tr = base.Transport
+		}
+		githubHTTPClient = &http.Client{
+			Transport: tr,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+	}
+	return githubHTTPClient
 }
 
 // GetSearchHTTPClient 获取搜索HTTP客户端

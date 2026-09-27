@@ -59,11 +59,58 @@ func TestChinaOptimizeConfigLoad(t *testing.T) {
 	if cfg.ChinaOptimize.Mode != "backend" {
 		t.Fatalf("ChinaOptimize.Mode = %q, want backend", cfg.ChinaOptimize.Mode)
 	}
-	if cfg.ChinaOptimize.DockerBase != "https://gh-proxy.org/docker" {
-		t.Fatalf("ChinaOptimize.DockerBase = %q", cfg.ChinaOptimize.DockerBase)
+	// 字符串形式 dockerBase 应仅映射到 Docker Hub
+	scopes := cfg.ChinaOptimize.DockerBase
+	if len(scopes) != 1 {
+		t.Fatalf("expected 1 scope from string dockerBase, got %d", len(scopes))
+	}
+	if scopes[0].Host != "registry-1.docker.io" || scopes[0].Base != "https://gh-proxy.org/docker" {
+		t.Fatalf("unexpected scope: %+v", scopes[0])
 	}
 	if cfg.ChinaOptimize.GitHubBase != "https://gh-proxy.com" {
 		t.Fatalf("ChinaOptimize.GitHubBase = %q", cfg.ChinaOptimize.GitHubBase)
+	}
+}
+
+func TestChinaOptimizeDockerBaseArray(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cn-array.toml")
+	data := []byte(`[chinaOptimize]
+		mode = "backend"
+		dockerBase = [
+			{ host = "registry-1.docker.io", base = "https://gh-proxy.org/docker" },
+			{ host = "gcr.io", base = "https://gcr.example.com" },
+			{ host = "ghcr.io", base = "https://ghcr.example.com" },
+			{ host = "registry.k8s.io", base = "https://k8s.example.com" },
+		]
+	`)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("CONFIG_PATH", path)
+	if err := LoadConfig(); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := GetConfig()
+	scopes := cfg.ChinaOptimize.DockerBase
+	want := map[string]string{
+		"registry-1.docker.io": "https://gh-proxy.org/docker",
+		"gcr.io":               "https://gcr.example.com",
+		"ghcr.io":              "https://ghcr.example.com",
+		"registry.k8s.io":      "https://k8s.example.com",
+	}
+	if len(scopes) != len(want) {
+		t.Fatalf("expected %d scopes, got %d: %+v", len(want), len(scopes), scopes)
+	}
+	got := map[string]string{}
+	for _, s := range scopes {
+		got[s.Host] = s.Base
+	}
+	for host, base := range want {
+		if got[host] != base {
+			t.Fatalf("scope[%q] = %q, want %q", host, got[host], base)
+		}
 	}
 }
 
@@ -86,8 +133,9 @@ func TestChinaOptimizeEnvOverride(t *testing.T) {
 	if cfg.ChinaOptimize.Mode != "302" {
 		t.Fatalf("ChinaOptimize.Mode = %q, want 302", cfg.ChinaOptimize.Mode)
 	}
-	if cfg.ChinaOptimize.DockerBase != "https://gh-proxy.org/docker" {
-		t.Fatalf("DockerBase trailing slash not trimmed: %q", cfg.ChinaOptimize.DockerBase)
+	scopes := cfg.ChinaOptimize.DockerBase
+	if len(scopes) != 1 || scopes[0].Host != "registry-1.docker.io" || scopes[0].Base != "https://gh-proxy.org/docker" {
+		t.Fatalf("DockerBase env override failed, scopes: %+v", scopes)
 	}
 	if cfg.ChinaOptimize.GitHubBase != "https://gh-proxy.com" {
 		t.Fatalf("GitHubBase trailing slash not trimmed: %q", cfg.ChinaOptimize.GitHubBase)

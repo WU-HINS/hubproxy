@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"strconv"
@@ -17,6 +18,109 @@ type RegistryMapping struct {
 	AuthHost string `toml:"authHost"`
 	AuthType string `toml:"authType"`
 	Enabled  bool   `toml:"enabled"`
+}
+
+// DockerScope 单个上游 registry 主机的国内回源作用域。
+// Host 为该 registry 的上游主机名，Base 为对应的国内回源地址。
+type DockerScope struct {
+	Host string `toml:"host"`
+	Base string `toml:"base"`
+}
+
+// ChinaOptimizeConfig 国内访问优化配置（对应 TOML 的 [chinaOptimize] 段）。
+type ChinaOptimizeConfig struct {
+	// 优化模式：""（关闭/原生直连）| "backend"（后端回源改写）| "302"（重定向到代理）
+	Mode string
+
+	// 按上游 registry 主机划分的国内回源作用域。
+	// 对应 TOML 的 dockerBase，兼容两种写法：
+	//   - 单个字符串 "https://gh-proxy.org/docker"：仅作用于 Docker Hub（registry-1.docker.io）
+	//   - 数组 [{ host = "gcr.io", base = "https://gcr.example.com" }, ...]：
+	//     每项把一个 registry 主机映射到对应回源地址，可覆盖 Docker Hub / GCR / GHCR /
+	//     registry.k8s.io 等任意 registry（gh-proxy 类加速源常同时支持 GCR/GHCR/K8s）。
+	DockerBase []DockerScope
+
+	// GitHub 后端回源/302 的基础地址（如 https://gh-proxy.com）。
+	GitHubBase string
+}
+
+// UnmarshalTOML 自定义解析整个 [chinaOptimize] 表，使 dockerBase 同时兼容字符串与数组两种写法。
+// 需要 toml.Decoder.EnableUnmarshalerInterface；data 为该表所有 key-value 的原始 TOML 文本。
+// 未出现的字段保留调用前的值（即 DefaultConfig 的默认值）。
+func (c *ChinaOptimizeConfig) UnmarshalTOML(data []byte) error {
+	var raw struct {
+		Mode       *string `toml:"mode"`
+		DockerBase any     `toml:"dockerBase"`
+		GitHubBase *string `toml:"githubBase"`
+	}
+	if err := toml.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw.Mode != nil {
+		c.Mode = strings.TrimSpace(*raw.Mode)
+	}
+	if raw.GitHubBase != nil {
+		c.GitHubBase = strings.TrimSpace(strings.TrimSuffix(*raw.GitHubBase, "/"))
+	}
+	if raw.DockerBase != nil {
+		c.DockerBase = parseDockerScopes(raw.DockerBase)
+	}
+	return nil
+}
+
+// parseDockerScopes 把 dockerBase 的原始值（string 或 [{host,base},...]）解析为作用域列表。
+func parseDockerScopes(v any) []DockerScope {
+	switch val := v.(type) {
+	case string:
+		if base := strings.TrimSpace(strings.TrimSuffix(val, "/")); base != "" {
+			return []DockerScope{{Host: "registry-1.docker.io", Base: base}}
+		}
+	case []any:
+		scopes := make([]DockerScope, 0, len(val))
+		for _, elem := range val {
+			if m, ok := elem.(map[string]any); ok {
+				if s, ok := scopeFromMap(m); ok {
+					scopes = append(scopes, s)
+				}
+			}
+		}
+		return scopes
+	case []map[string]any:
+		scopes := make([]DockerScope, 0, len(val))
+		for _, m := range val {
+			if s, ok := scopeFromMap(m); ok {
+				scopes = append(scopes, s)
+			}
+		}
+		return scopes
+	}
+	return nil
+}
+
+func scopeFromMap(m map[string]any) (DockerScope, bool) {
+	hs, _ := m["host"].(string)
+	bs, _ := m["base"].(string)
+	hs = strings.TrimSpace(hs)
+	bs = strings.TrimSpace(strings.TrimSuffix(bs, "/"))
+	if hs == "" || bs == "" {
+		return DockerScope{}, false
+	}
+	return DockerScope{Host: hs, Base: bs}, true
+}
+
+// SetDockerHubBase 将 Docker Hub 的回源地址设为单个地址（用于默认值与环境变量覆盖）。
+func (c *ChinaOptimizeConfig) SetDockerHubBase(base string) {
+	base = strings.TrimSpace(strings.TrimSuffix(base, "/"))
+	if base == "" {
+		return
+	}
+	for i := range c.DockerBase {
+		if c.DockerBase[i].Host == "registry-1.docker.io" {
+			c.DockerBase[i].Base = base
+			return
+		}
+	}
+	c.DockerBase = append(c.DockerBase, DockerScope{Host: "registry-1.docker.io", Base: base})
 }
 
 // AppConfig 应用配置结构体
@@ -57,20 +161,7 @@ type AppConfig struct {
 	} `toml:"tokenCache"`
 
 	// 国内访问优化配置
-	ChinaOptimize struct {
-		// 优化模式：""（关闭/原生直连）| "backend"（后端回源改写）| "302"（重定向到代理）
-		Mode string `toml:"mode"`
-
-		// Docker 后端回源目标（仅对 Docker Hub 公共镜像生效）。
-		// 只改写 registry-1.docker.io 且无鉴权(Authorization)的拉取，
-		// 有鉴权/私有镜像以及 ghcr/gcr/quay 等非 Docker Hub 的 registry 直接走原路由。
-		// 示例：https://docker.1ms.run
-		DockerBase string `toml:"dockerBase"`
-
-		// GitHub 后端回源/302 的基础地址（如 https://gh-proxy.com）
-		// 实际请求 = {GitHubBase}/https://github.com/...
-		GitHubBase string `toml:"githubBase"`
-	} `toml:"chinaOptimize"`
+	ChinaOptimize ChinaOptimizeConfig `toml:"chinaOptimize"`
 }
 
 var (
@@ -160,13 +251,9 @@ func DefaultConfig() *AppConfig {
 			Enabled:    true,
 			DefaultTTL: "20m",
 		},
-		ChinaOptimize: struct {
-			Mode       string `toml:"mode"`
-			DockerBase string `toml:"dockerBase"`
-			GitHubBase string `toml:"githubBase"`
-		}{
+		ChinaOptimize: ChinaOptimizeConfig{
 			Mode:       "",
-			DockerBase: "https://gh-proxy.org/docker",
+			DockerBase: []DockerScope{{Host: "registry-1.docker.io", Base: "https://gh-proxy.org/docker"}},
 			GitHubBase: "https://gh-proxy.com",
 		},
 	}
@@ -234,7 +321,10 @@ func LoadConfig() error {
 	path := configFilePath()
 
 	if data, err := os.ReadFile(path); err == nil {
-		if err := toml.Unmarshal(data, cfg); err != nil {
+		// 启用 unstable.Unmarshaler 接口，使 [chinaOptimize] 表由 ChinaOptimizeConfig 自定义解析，
+		// 从而 dockerBase 同时兼容字符串与数组两种写法。
+		dec := toml.NewDecoder(bytes.NewReader(data)).EnableUnmarshalerInterface()
+		if err := dec.Decode(cfg); err != nil {
 			return fmt.Errorf("解析配置文件 %s 失败: %v", path, err)
 		}
 	} else {
@@ -305,7 +395,7 @@ func overrideFromEnv(cfg *AppConfig) {
 		cfg.ChinaOptimize.Mode = strings.TrimSpace(val)
 	}
 	if val := os.Getenv("CN_DOCKER_BASE"); val != "" {
-		cfg.ChinaOptimize.DockerBase = strings.TrimSpace(strings.TrimSuffix(val, "/"))
+		cfg.ChinaOptimize.SetDockerHubBase(val)
 	}
 	if val := os.Getenv("CN_GITHUB_BASE"); val != "" {
 		cfg.ChinaOptimize.GitHubBase = strings.TrimSpace(strings.TrimSuffix(val, "/"))

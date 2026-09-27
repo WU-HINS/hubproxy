@@ -100,14 +100,30 @@ defaultTTL = "20m"
 #            但回源拉取这一跳改写为下方回源地址，客户端 docker pull / wget 命令零改动。
 #   "302"    重定向模式：GitHub 加速直接 302 跳转到回源地址，由客户端直连。
 #            （Docker 因 Registry v2 协议无法用 302，仍走后端回源改写）
+# 两种模式都会把"回源地址自身返回的 302"提前扁平化，避免多次 302：
+#   - backend：在服务端逐跳跟随；若跳转回 GitHub 家族地址，会重新按回源地址改写，
+#             保证每一跳都走国内反代，客户端全程看不到 302。
+#   - 302：先在后端解析出最终地址，客户端只经历一次跳转、直接命中最终地址。
 mode = ""
 
-# ── Docker 回源目标（仅 backend 模式下、"Docker Hub 公共镜且无鉴权"生效）──
-# gh-proxy 可作为 docker pull 目标（docker pull {dockerBase}/nginx 能拉下镜像），
+# ── Docker/Registry 回源目标（仅 backend 模式下、"无鉴权"请求生效）──
+# gh-proxy 类加速源可作为 docker pull 目标（docker pull {dockerBase}/nginx 能拉下镜像），
 #   但不能写进 daemon.json 的 registry-mirrors（它不是透明 Docker Hub 镜像，路径带 /docker 前缀）。
-# 只改写：registry-1.docker.io 的无鉴权(Authorization)请求 → {dockerBase}/v2/...
-# 有鉴权/私有镜像、以及 ghcr/gcr/quay 等非 Docker Hub 的 registry：直接走原路由直连上游。
+# 支持两种写法（按 registry 主机划分作用域，可覆盖 Docker Hub / gcr / ghcr / registry.k8s.io 等）：
+#   1) 单个字符串：dockerBase = "https://gh-proxy.org/docker"（仅作用于 Docker Hub）
+#   2) 数组：dockerBase = [{ host = "gcr.io", base = "https://gcr.example.com" }, ...]（每项一个 registry）
+# 只改写：配置中对应主机的无鉴权(Authorization)请求 → {base}/v2/...
+# 未配置的 registry、有鉴权/私有镜像：直接走原路由直连上游。
 dockerBase = "https://gh-proxy.org/docker"
+
+# ── 数组写法示例（按 registry 划分作用域，取消注释并删除上面的单字符串即可）──
+# 同一个 gh-proxy 类加速源常同时支持 GCR / GHCR / Kubernetes / Docker Hub：
+# dockerBase = [
+#   { host = "registry-1.docker.io", base = "https://gh-proxy.org/docker" },
+#   { host = "gcr.io",               base = "https://gcr.example.com" },
+#   { host = "ghcr.io",              base = "https://ghcr.example.com" },
+#   { host = "registry.k8s.io",      base = "https://k8s.example.com" },
+# ]
 
 # GitHub 回源基础地址（backend / 302 模式生效）
 #   gh-proxy 实测可加速 GitHub（返回真实文件）
